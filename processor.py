@@ -1016,33 +1016,32 @@ def normalize_table_code(value) -> str:
 def build_protheus_csv_from_df(df_saida: pd.DataFrame, tabela: str) -> bytes:
     """Gera CSV de subida Protheus no layout aceito pelo importador DA1.
 
-    Modelo validado no Protheus:
-    - 1ª linha: 007;;;  (4 campos, sendo 3 delimitadores)
-    - Demais linhas: SKU;PRECO;DATA;  (4 campos, último campo vazio)
+    Formato obrigatório validado contra o modelo manual que funcionou:
+    - Linha 1: 007;;;  -> 4 campos
+    - Linhas seguintes: SKU;PRECO;DATA;  -> 4 campos, com ; final
 
-    Observação importante:
-    O importador customizado IMPDA1/DA1 acessa uma 4ª posição do array ao ler
-    o CSV. Por isso, mesmo havendo só 3 campos úteis, cada linha precisa terminar
-    com ';'. Sem esse delimitador final, o Protheus quebra com "array out of
-    bounds (4 of 3)".
+    Não use csv.writer aqui: alguns leitores/importadores removem o campo vazio
+    final dependendo da configuração. Montamos a linha de forma explícita para
+    garantir que o último caractere útil de cada linha seja sempre ';'.
     """
-    tabela = normalize_table_code(tabela)
-    linhas = [f"{tabela};;;"]
+    tabela_norm = normalize_table_code(tabela)
+    linhas = [f"{tabela_norm};;;"]
 
     if df_saida is not None and not df_saida.empty:
         for _, row in df_saida.iterrows():
             sku_norm = normalize_sku(row.get("SKU"))
             preco = row.get("Preço")
             data = row.get("Data")
-            linhas.append(";".join([
-                _csv_value(sku_norm),
-                _csv_value(preco),
-                _csv_value(data),
-                "",
-            ]))
 
-    return ("\r\n".join(linhas) + "\r\n").encode("utf-8")
+            sku_txt = _csv_value(sku_norm)
+            preco_txt = _csv_value(preco)
+            data_txt = _csv_value(data)
 
+            # O ; final é obrigatório para o Protheus criar a 4ª posição do array.
+            linhas.append(f"{sku_txt};{preco_txt};{data_txt};")
+
+    conteudo = "\r\n".join(linhas) + "\r\n"
+    return conteudo.encode("utf-8")
 
 def build_protheus_csv(result: ProcessResult, config: Optional[ProcessConfig] = None, tabela: str = "007") -> bytes:
     config = config or ProcessConfig()
