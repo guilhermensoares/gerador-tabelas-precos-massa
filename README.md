@@ -170,3 +170,20 @@ Essa função evita que o usuário edite o CSV manualmente no Excel, preservando
 007;;;
 36556;62.00;17/06/2026;
 ```
+
+## Feature V13 - nome personalizado nos downloads
+
+Depois da etapa de revisão de SKUs, o app exibe o campo **Identificação dos arquivos (opcional)**.
+
+Quando preenchido, esse texto passa a compor o nome dos arquivos baixados, junto com o código da tabela e a data em `DDMMAAAA`.
+
+Exemplo com identificação `FEBI` e data `17/06/2026`:
+
+- `001 - FEBI 17062026.csv`
+- `007 - FEBI 17062026.csv`
+- `013 - FEBI 17062026.csv`
+- `relatorio_precificacao_comum - FEBI 17062026.xlsx`
+- `log_precificacao_comum - FEBI 17062026.txt`
+- `pacote_precificacao_comum - FEBI 17062026.zip`
+
+Se o campo ficar vazio, o app usa o padrão técnico anterior.

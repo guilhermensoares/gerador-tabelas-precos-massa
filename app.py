@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import date, datetime
 from typing import Dict, Set, Tuple
+import re
 
 import pandas as pd
 import streamlit as st
@@ -26,7 +27,7 @@ st.set_page_config(page_title="GERADOR DE TABELAS DE PREÇOS EM MASSA", layout="
 st.title("GERADOR DE TABELAS DE PREÇOS EM MASSA")
 st.caption(
     "Home com dois módulos: Precificação Comum e Adequação Mercado Livre. "
-    "Versão V12 - seleção de SKUs para exportação antes do download."
+    "Versão V13 - seleção de SKUs e nome personalizado para download."
 )
 
 if "resultado_ml" not in st.session_state:
@@ -120,14 +121,38 @@ def _build_common_filtered_result(result, selected_skus: Set[str]):
     return replace(result, analise=analise, saidas=saidas)
 
 
-def _build_ml_outputs(payload, filtered_result):
+
+def _sanitizar_nome_download(value: str) -> str:
+    """Remove caracteres problemáticos para nome de arquivo no Windows/Protheus."""
+    nome = str(value or "").strip()
+    nome = re.sub(r'[\\/:*?"<>|]+', " ", nome)
+    nome = re.sub(r"\s+", " ", nome).strip()
+    return nome
+
+
+def _nome_arquivo_tabela(tabela: str, identificacao: str, data_download: str) -> str:
+    tabela_norm = normalize_table_code(tabela)
+    nome = _sanitizar_nome_download(identificacao)
+    if nome:
+        return f"{tabela_norm} - {nome} {data_download}.csv"
+    return f"protheus_tabela_{tabela_norm}_{data_download}.csv"
+
+
+def _nome_arquivo_auxiliar(prefixo: str, identificacao: str, data_download: str, extensao: str) -> str:
+    nome = _sanitizar_nome_download(identificacao)
+    if nome:
+        return f"{prefixo} - {nome} {data_download}.{extensao}"
+    return f"{prefixo}_{data_download}.{extensao}"
+
+def _build_ml_outputs(payload, filtered_result, identificacao_download: str = ""):
     cfg = payload["config"]
     data_nome = payload["data_nome"]
+    data_download = payload.get("data_download", data_nome)
     selecionados = payload.get("selecionados", {})
     outputs = {}
 
     if selecionados.get("relatorio"):
-        report_name = f"relatorio_tabela_007_013_ml_{data_nome}.xlsx"
+        report_name = _nome_arquivo_auxiliar("relatorio_tabela_007_013_ml", identificacao_download, data_download, "xlsx")
         outputs[report_name] = {
             "label": "Relatório completo",
             "bytes": build_report_excel(filtered_result),
@@ -136,7 +161,7 @@ def _build_ml_outputs(payload, filtered_result):
 
     if selecionados.get("tabela_007"):
         tabela_007_norm = normalize_table_code(cfg.tabela_codigo)
-        fname = f"protheus_tabela_{tabela_007_norm}_{data_nome}.csv"
+        fname = _nome_arquivo_tabela(tabela_007_norm, identificacao_download, data_download)
         outputs[fname] = {
             "label": f"Protheus {tabela_007_norm}",
             "bytes": build_protheus_csv(filtered_result, cfg, tabela=cfg.tabela_codigo),
@@ -145,7 +170,7 @@ def _build_ml_outputs(payload, filtered_result):
 
     if selecionados.get("tabela_013"):
         tabela_013_norm = normalize_table_code(cfg.tabela_codigo_013)
-        fname = f"protheus_tabela_{tabela_013_norm}_{data_nome}.csv"
+        fname = _nome_arquivo_tabela(tabela_013_norm, identificacao_download, data_download)
         outputs[fname] = {
             "label": f"Protheus {tabela_013_norm}",
             "bytes": build_protheus_csv(filtered_result, cfg, tabela=cfg.tabela_codigo_013),
@@ -153,21 +178,22 @@ def _build_ml_outputs(payload, filtered_result):
         }
 
     if selecionados.get("log"):
-        log_name = f"log_tabela_007_013_ml_{data_nome}.txt"
+        log_name = _nome_arquivo_auxiliar("log_tabela_007_013_ml", identificacao_download, data_download, "txt")
         outputs[log_name] = {"label": "Log TXT", "bytes": build_log_txt(filtered_result), "mime": "text/plain"}
 
-    zip_name = f"pacote_tabela_007_013_ml_{data_nome}.zip"
+    zip_name = _nome_arquivo_auxiliar("pacote_tabela_007_013_ml", identificacao_download, data_download, "zip")
     zip_bytes = build_zip_generic({name: item["bytes"] for name, item in outputs.items()})
     return outputs, zip_name, zip_bytes
 
 
-def _build_common_outputs(payload, filtered_result):
+def _build_common_outputs(payload, filtered_result, identificacao_download: str = ""):
     data_nome = payload["data_nome"]
+    data_download = payload.get("data_download", data_nome)
     selecionados = payload.get("selecionados", {})
     outputs = {}
 
     if selecionados.get("relatorio"):
-        report_name = f"relatorio_precificacao_comum_{data_nome}.xlsx"
+        report_name = _nome_arquivo_auxiliar("relatorio_precificacao_comum", identificacao_download, data_download, "xlsx")
         outputs[report_name] = {
             "label": "Relatório",
             "bytes": build_common_report_excel(filtered_result),
@@ -175,19 +201,19 @@ def _build_common_outputs(payload, filtered_result):
         }
 
     if selecionados.get("log"):
-        log_name = f"log_precificacao_comum_{data_nome}.txt"
+        log_name = _nome_arquivo_auxiliar("log_precificacao_comum", identificacao_download, data_download, "txt")
         outputs[log_name] = {"label": "Log TXT", "bytes": build_common_log_txt(filtered_result), "mime": "text/plain"}
 
     for tabela in selecionados.get("tabelas", []):
         tabela_norm = normalize_table_code(tabela)
-        fname = f"protheus_tabela_{tabela_norm}_{data_nome}.csv"
+        fname = _nome_arquivo_tabela(tabela_norm, identificacao_download, data_download)
         outputs[fname] = {
             "label": f"Protheus {tabela_norm}",
             "bytes": build_common_protheus_csv(filtered_result, tabela_norm),
             "mime": "text/csv",
         }
 
-    zip_name = f"pacote_precificacao_comum_{data_nome}.zip"
+    zip_name = _nome_arquivo_auxiliar("pacote_precificacao_comum", identificacao_download, data_download, "zip")
     zip_bytes = build_zip_generic({name: item["bytes"] for name, item in outputs.items()})
     return outputs, zip_name, zip_bytes
 
@@ -306,11 +332,13 @@ def render_adequacao_ml():
                 data_alteracao=data_alt,
             )
             data_nome = data_alt.strftime("%Y%m%d")
+            data_download = data_alt.strftime("%d%m%Y")
 
         st.session_state["resultado_ml"] = {
             "result": result,
             "config": cfg,
             "data_nome": data_nome,
+            "data_download": data_download,
             "gerado_em": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
             "generation_id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
             "selecionados": {
@@ -347,9 +375,18 @@ def render_adequacao_ml():
         c2.metric("Linhas CSV 007", len(filtered_result.protheus))
         c3.metric("Linhas CSV 013", len(filtered_result.protheus_013))
 
-        outputs, zip_name, zip_bytes = _build_ml_outputs(payload, filtered_result)
+        st.subheader("4. Nomear arquivos para download")
+        identificacao_download = st.text_input(
+            "Identificação dos arquivos (opcional)",
+            value="",
+            placeholder="Exemplo: FEBI",
+            help="Se preenchido, os arquivos serão baixados como: 007 - FEBI 17062026.csv, 013 - FEBI 17062026.csv, etc.",
+            key=f"ml_nome_download_{payload['generation_id']}",
+        )
 
-        st.subheader("4. Baixar arquivos selecionados")
+        outputs, zip_name, zip_bytes = _build_ml_outputs(payload, filtered_result, identificacao_download)
+
+        st.subheader("5. Baixar arquivos selecionados")
         _render_downloads(outputs, zip_name, zip_bytes, "ml")
 
         tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Análise", "Alertas", "Comparativo", "Log", "Protheus 007", "Protheus 013"])
@@ -469,11 +506,13 @@ def render_precificacao_comum():
         with st.spinner("Processando Precificação Comum..."):
             result = processar_precificacao_comum(base_file, config=cfg, data_alteracao=data_alt)
             data_nome = data_alt.strftime("%Y%m%d")
+            data_download = data_alt.strftime("%d%m%Y")
 
         st.session_state["resultado_comum"] = {
             "result": result,
             "config": cfg,
             "data_nome": data_nome,
+            "data_download": data_download,
             "gerado_em": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
             "generation_id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
             "selecionados": {
@@ -500,10 +539,7 @@ def render_precificacao_comum():
             "Todos os SKUs vêm marcados por padrão. Desmarque os que não devem entrar nos CSVs Protheus desta execução. "
             "A análise permanece disponível para auditoria."
         )
-        default_skus = set()
-        for df_saida in result.saidas.values():
-            if df_saida is not None and not df_saida.empty and "SKU" in df_saida.columns:
-                default_skus.update(df_saida["SKU"].astype(str).apply(_normalizar_sku_exportacao).tolist())
+        default_skus = set(result.analise["SKU"].astype(str).apply(_normalizar_sku_exportacao).tolist()) if not result.analise.empty else set()
         selected_skus, selection_table = _render_editor_exportacao(result.analise, f"comum_editor_{payload['generation_id']}", default_skus)
         filtered_result = _build_common_filtered_result(result, selected_skus)
 
@@ -511,9 +547,18 @@ def render_precificacao_comum():
         c1.metric("SKUs selecionados", len(selected_skus))
         c2.metric("Tabelas Protheus selecionadas", len(payload.get("selecionados", {}).get("tabelas", [])))
 
-        outputs, zip_name, zip_bytes = _build_common_outputs(payload, filtered_result)
+        st.subheader("4. Nomear arquivos para download")
+        identificacao_download = st.text_input(
+            "Identificação dos arquivos (opcional)",
+            value="",
+            placeholder="Exemplo: FEBI",
+            help="Se preenchido, os arquivos serão baixados como: 001 - FEBI 17062026.csv, 007 - FEBI 17062026.csv, etc.",
+            key=f"comum_nome_download_{payload['generation_id']}",
+        )
 
-        st.subheader("4. Baixar arquivos selecionados")
+        outputs, zip_name, zip_bytes = _build_common_outputs(payload, filtered_result, identificacao_download)
+
+        st.subheader("5. Baixar arquivos selecionados")
         _render_downloads(outputs, zip_name, zip_bytes, "comum")
 
         tabs = st.tabs(["Análise", "Log", "001", "004", "012", "007", "013"])
