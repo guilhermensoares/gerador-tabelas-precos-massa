@@ -1,5 +1,8 @@
+from dataclasses import replace
 from datetime import date, datetime
+from typing import Dict, Set, Tuple
 
+import pandas as pd
 import streamlit as st
 
 from processor import (
@@ -7,7 +10,6 @@ from processor import (
     processar_precos,
     build_report_excel,
     build_protheus_csv,
-    build_zip,
     build_log_txt,
     CommonPricingConfig,
     processar_precificacao_comum,
@@ -15,12 +17,17 @@ from processor import (
     build_common_protheus_csv,
     build_common_log_txt,
     build_zip_generic,
+    normalize_table_code,
+    normalize_sku,
 )
 
 st.set_page_config(page_title="GERADOR DE TABELAS DE PREÇOS EM MASSA", layout="wide")
 
 st.title("GERADOR DE TABELAS DE PREÇOS EM MASSA")
-st.caption("Home com dois módulos: Precificação Comum e Adequação Mercado Livre.")
+st.caption(
+    "Home com dois módulos: Precificação Comum e Adequação Mercado Livre. "
+    "Versão V12 - seleção de SKUs para exportação antes do download."
+)
 
 if "resultado_ml" not in st.session_state:
     st.session_state["resultado_ml"] = None
@@ -33,6 +40,170 @@ modulo = st.sidebar.radio(
     ["Precificação Comum", "Adequação ML"],
     index=0,
 )
+
+
+def _normalizar_sku_exportacao(value) -> str:
+    sku = normalize_sku(value)
+    return str(sku or "").strip()
+
+
+def _filtrar_df_por_skus(df: pd.DataFrame, selected_skus: Set[str]) -> pd.DataFrame:
+    """Filtra DataFrames de saída Protheus sem alterar a lógica do motor."""
+    if df is None or df.empty or "SKU" not in df.columns:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    filtrado = df.copy()
+    filtrado["_SKU_FILTRAGEM_EXPORTACAO"] = filtrado["SKU"].apply(_normalizar_sku_exportacao)
+    filtrado = filtrado[filtrado["_SKU_FILTRAGEM_EXPORTACAO"].isin(selected_skus)].drop(columns=["_SKU_FILTRAGEM_EXPORTACAO"])
+    return filtrado.reset_index(drop=True)
+
+
+def _analise_com_coluna_exportar(df: pd.DataFrame, selected_skus: Set[str]) -> pd.DataFrame:
+    if df is None or df.empty or "SKU" not in df.columns:
+        return df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    analise = df.copy()
+    skus_norm = analise["SKU"].apply(_normalizar_sku_exportacao)
+    analise.insert(0, "Exportar?", skus_norm.isin(selected_skus))
+    return analise
+
+
+def _render_editor_exportacao(df: pd.DataFrame, key: str, default_skus: Set[str]) -> Tuple[Set[str], pd.DataFrame]:
+    """Mostra a revisão de SKUs com checkbox e retorna os SKUs marcados."""
+    if df is None or df.empty or "SKU" not in df.columns:
+        st.warning("Não há SKUs disponíveis para revisão de exportação.")
+        return set(), df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame()
+
+    tabela = df.copy()
+    skus_norm = tabela["SKU"].apply(_normalizar_sku_exportacao)
+    tabela.insert(0, "Exportar?", skus_norm.isin(default_skus))
+
+    disabled_cols = [col for col in tabela.columns if col != "Exportar?"]
+    edited = st.data_editor(
+        tabela,
+        use_container_width=True,
+        hide_index=True,
+        disabled=disabled_cols,
+        column_config={
+            "Exportar?": st.column_config.CheckboxColumn(
+                "Exportar?",
+                help="Desmarque para retirar o SKU dos arquivos Protheus desta execução.",
+                default=True,
+            )
+        },
+        key=key,
+    )
+
+    selected = set(
+        edited.loc[edited["Exportar?"] == True, "SKU"]  # noqa: E712
+        .apply(_normalizar_sku_exportacao)
+        .dropna()
+        .astype(str)
+        .tolist()
+    )
+    return selected, edited
+
+
+def _build_ml_filtered_result(result, selected_skus: Set[str]):
+    analise = _analise_com_coluna_exportar(result.analise, selected_skus)
+    protheus = _filtrar_df_por_skus(result.protheus, selected_skus)
+    protheus_013 = _filtrar_df_por_skus(result.protheus_013, selected_skus)
+    return replace(result, analise=analise, protheus=protheus, protheus_013=protheus_013)
+
+
+def _build_common_filtered_result(result, selected_skus: Set[str]):
+    analise = _analise_com_coluna_exportar(result.analise, selected_skus)
+    saidas = {
+        tabela: _filtrar_df_por_skus(df, selected_skus)
+        for tabela, df in result.saidas.items()
+    }
+    return replace(result, analise=analise, saidas=saidas)
+
+
+def _build_ml_outputs(payload, filtered_result):
+    cfg = payload["config"]
+    data_nome = payload["data_nome"]
+    selecionados = payload.get("selecionados", {})
+    outputs = {}
+
+    if selecionados.get("relatorio"):
+        report_name = f"relatorio_tabela_007_013_ml_{data_nome}.xlsx"
+        outputs[report_name] = {
+            "label": "Relatório completo",
+            "bytes": build_report_excel(filtered_result),
+            "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }
+
+    if selecionados.get("tabela_007"):
+        tabela_007_norm = normalize_table_code(cfg.tabela_codigo)
+        fname = f"protheus_tabela_{tabela_007_norm}_{data_nome}.csv"
+        outputs[fname] = {
+            "label": f"Protheus {tabela_007_norm}",
+            "bytes": build_protheus_csv(filtered_result, cfg, tabela=cfg.tabela_codigo),
+            "mime": "text/csv",
+        }
+
+    if selecionados.get("tabela_013"):
+        tabela_013_norm = normalize_table_code(cfg.tabela_codigo_013)
+        fname = f"protheus_tabela_{tabela_013_norm}_{data_nome}.csv"
+        outputs[fname] = {
+            "label": f"Protheus {tabela_013_norm}",
+            "bytes": build_protheus_csv(filtered_result, cfg, tabela=cfg.tabela_codigo_013),
+            "mime": "text/csv",
+        }
+
+    if selecionados.get("log"):
+        log_name = f"log_tabela_007_013_ml_{data_nome}.txt"
+        outputs[log_name] = {"label": "Log TXT", "bytes": build_log_txt(filtered_result), "mime": "text/plain"}
+
+    zip_name = f"pacote_tabela_007_013_ml_{data_nome}.zip"
+    zip_bytes = build_zip_generic({name: item["bytes"] for name, item in outputs.items()})
+    return outputs, zip_name, zip_bytes
+
+
+def _build_common_outputs(payload, filtered_result):
+    data_nome = payload["data_nome"]
+    selecionados = payload.get("selecionados", {})
+    outputs = {}
+
+    if selecionados.get("relatorio"):
+        report_name = f"relatorio_precificacao_comum_{data_nome}.xlsx"
+        outputs[report_name] = {
+            "label": "Relatório",
+            "bytes": build_common_report_excel(filtered_result),
+            "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        }
+
+    if selecionados.get("log"):
+        log_name = f"log_precificacao_comum_{data_nome}.txt"
+        outputs[log_name] = {"label": "Log TXT", "bytes": build_common_log_txt(filtered_result), "mime": "text/plain"}
+
+    for tabela in selecionados.get("tabelas", []):
+        tabela_norm = normalize_table_code(tabela)
+        fname = f"protheus_tabela_{tabela_norm}_{data_nome}.csv"
+        outputs[fname] = {
+            "label": f"Protheus {tabela_norm}",
+            "bytes": build_common_protheus_csv(filtered_result, tabela_norm),
+            "mime": "text/csv",
+        }
+
+    zip_name = f"pacote_precificacao_comum_{data_nome}.zip"
+    zip_bytes = build_zip_generic({name: item["bytes"] for name, item in outputs.items()})
+    return outputs, zip_name, zip_bytes
+
+
+def _render_downloads(outputs: Dict[str, Dict], zip_name: str, zip_bytes: bytes, key_prefix: str):
+    download_items = list(outputs.items()) + [(zip_name, {"label": "ZIP selecionados", "bytes": zip_bytes, "mime": "application/zip"})]
+    cols = st.columns(min(len(download_items), 6))
+    for idx, (fname, item) in enumerate(download_items):
+        with cols[idx % len(cols)]:
+            st.download_button(
+                item["label"],
+                item["bytes"],
+                fname,
+                mime=item["mime"],
+                key=f"{key_prefix}_down_{idx}_{fname}",
+            )
 
 
 def render_adequacao_ml():
@@ -135,45 +306,13 @@ def render_adequacao_ml():
                 data_alteracao=data_alt,
             )
             data_nome = data_alt.strftime("%Y%m%d")
-            outputs = {}
-            protheus_payload = {}
-
-            if gerar_relatorio:
-                report_name = f"relatorio_tabela_007_013_ml_{data_nome}.xlsx"
-                report_bytes = build_report_excel(result)
-                outputs[report_name] = {
-                    "label": "Relatório completo",
-                    "bytes": report_bytes,
-                    "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                }
-
-            if gerar_007:
-                protheus_007_name = f"protheus_tabela_{cfg.tabela_codigo}_{data_nome}.csv"
-                protheus_007_bytes = build_protheus_csv(result, cfg, tabela=cfg.tabela_codigo)
-                outputs[protheus_007_name] = {"label": f"Protheus {cfg.tabela_codigo}", "bytes": protheus_007_bytes, "mime": "text/csv"}
-                protheus_payload[cfg.tabela_codigo] = {"name": protheus_007_name, "bytes": protheus_007_bytes}
-
-            if gerar_013:
-                protheus_013_name = f"protheus_tabela_{cfg.tabela_codigo_013}_{data_nome}.csv"
-                protheus_013_bytes = build_protheus_csv(result, cfg, tabela=cfg.tabela_codigo_013)
-                outputs[protheus_013_name] = {"label": f"Protheus {cfg.tabela_codigo_013}", "bytes": protheus_013_bytes, "mime": "text/csv"}
-                protheus_payload[cfg.tabela_codigo_013] = {"name": protheus_013_name, "bytes": protheus_013_bytes}
-
-            if gerar_log:
-                log_name = f"log_tabela_007_013_ml_{data_nome}.txt"
-                log_txt_bytes = build_log_txt(result)
-                outputs[log_name] = {"label": "Log TXT", "bytes": log_txt_bytes, "mime": "text/plain"}
-
-            zip_name = f"pacote_tabela_007_013_ml_{data_nome}.zip"
-            zip_bytes = build_zip_generic({name: item["bytes"] for name, item in outputs.items()})
 
         st.session_state["resultado_ml"] = {
             "result": result,
+            "config": cfg,
+            "data_nome": data_nome,
             "gerado_em": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-            "outputs": outputs,
-            "zip_bytes": zip_bytes,
-            "zip_name": zip_name,
-            "protheus": protheus_payload,
+            "generation_id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
             "selecionados": {
                 "relatorio": gerar_relatorio,
                 "tabela_007": gerar_007,
@@ -185,7 +324,7 @@ def render_adequacao_ml():
     payload = st.session_state.get("resultado_ml")
     if payload:
         result = payload["result"]
-        st.success(f"Arquivos ML gerados com sucesso. Resultado mantido desde {payload['gerado_em']}.")
+        st.success(f"Processamento ML gerado com sucesso. Resultado mantido desde {payload['gerado_em']}.")
         r = result.resumo_dict
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("SKUs ML", r.get("SKUs na Lista ML revisada", 0))
@@ -194,23 +333,28 @@ def render_adequacao_ml():
         m4.metric("Prejuízo", r.get("Itens com prejuízo vs custo médio", 0))
         m5.metric("Alertas", len(result.alertas))
 
-        st.subheader("3. Baixar arquivos selecionados")
-        outputs = payload.get("outputs", {})
-        download_items = list(outputs.items()) + [(payload["zip_name"], {"label": "ZIP selecionados", "bytes": payload["zip_bytes"], "mime": "application/zip"})]
-        cols = st.columns(min(len(download_items), 6))
-        for idx, (fname, item) in enumerate(download_items):
-            with cols[idx % len(cols)]:
-                st.download_button(
-                    item["label"],
-                    item["bytes"],
-                    fname,
-                    mime=item["mime"],
-                    key=f"ml_down_{idx}_{fname}",
-                )
+        st.subheader("3. Revisar SKUs para exportação")
+        st.caption(
+            "Todos os SKUs vêm marcados por padrão. Desmarque os que não devem entrar nos CSVs Protheus desta execução. "
+            "O processamento continua visível para auditoria."
+        )
+        default_skus = set(result.protheus["SKU"].astype(str).apply(_normalizar_sku_exportacao).tolist()) if not result.protheus.empty else set()
+        selected_skus, selection_table = _render_editor_exportacao(result.analise, f"ml_editor_{payload['generation_id']}", default_skus)
+        filtered_result = _build_ml_filtered_result(result, selected_skus)
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("SKUs selecionados", len(selected_skus))
+        c2.metric("Linhas CSV 007", len(filtered_result.protheus))
+        c3.metric("Linhas CSV 013", len(filtered_result.protheus_013))
+
+        outputs, zip_name, zip_bytes = _build_ml_outputs(payload, filtered_result)
+
+        st.subheader("4. Baixar arquivos selecionados")
+        _render_downloads(outputs, zip_name, zip_bytes, "ml")
 
         tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Análise", "Alertas", "Comparativo", "Log", "Protheus 007", "Protheus 013"])
         with tab1:
-            st.dataframe(result.analise, use_container_width=True, hide_index=True)
+            st.dataframe(filtered_result.analise, use_container_width=True, hide_index=True)
         with tab2:
             st.dataframe(result.alertas, use_container_width=True, hide_index=True)
         with tab3:
@@ -220,12 +364,12 @@ def render_adequacao_ml():
             st.text_area("Prévia do log TXT", result.log_text, height=280, key="ml_log_preview")
         with tab5:
             if payload.get("selecionados", {}).get("tabela_007"):
-                st.dataframe(result.protheus, use_container_width=True, hide_index=True)
+                st.dataframe(filtered_result.protheus, use_container_width=True, hide_index=True)
             else:
                 st.write("Tabela 007 não foi selecionada para exportação nesta execução.")
         with tab6:
             if payload.get("selecionados", {}).get("tabela_013"):
-                st.dataframe(result.protheus_013, use_container_width=True, hide_index=True)
+                st.dataframe(filtered_result.protheus_013, use_container_width=True, hide_index=True)
             else:
                 st.write("Tabela 013 não foi selecionada para exportação nesta execução.")
 
@@ -296,7 +440,7 @@ def render_precificacao_comum():
         }.items()
         if selecionada
     ]
-    alguma_saida = any([gerar_relatorio, gerar_log, *[bool(tabelas_selecionadas)]])
+    alguma_saida = any([gerar_relatorio, gerar_log, bool(tabelas_selecionadas)])
 
     btn_col1, btn_col2 = st.columns([1, 4])
     with btn_col1:
@@ -325,40 +469,13 @@ def render_precificacao_comum():
         with st.spinner("Processando Precificação Comum..."):
             result = processar_precificacao_comum(base_file, config=cfg, data_alteracao=data_alt)
             data_nome = data_alt.strftime("%Y%m%d")
-            zip_name = f"pacote_precificacao_comum_{data_nome}.zip"
-
-            outputs = {}
-            protheus_payload = {}
-
-            if gerar_relatorio:
-                report_name = f"relatorio_precificacao_comum_{data_nome}.xlsx"
-                report_bytes = build_common_report_excel(result)
-                outputs[report_name] = {
-                    "label": "Relatório",
-                    "bytes": report_bytes,
-                    "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                }
-
-            if gerar_log:
-                log_name = f"log_precificacao_comum_{data_nome}.txt"
-                log_txt_bytes = build_common_log_txt(result)
-                outputs[log_name] = {"label": "Log TXT", "bytes": log_txt_bytes, "mime": "text/plain"}
-
-            for tabela in tabelas_selecionadas:
-                fname = f"protheus_tabela_{tabela}_{data_nome}.csv"
-                content = build_common_protheus_csv(result, tabela)
-                outputs[fname] = {"label": f"Protheus {tabela}", "bytes": content, "mime": "text/csv"}
-                protheus_payload[tabela] = {"name": fname, "bytes": content}
-
-            zip_bytes = build_zip_generic({name: item["bytes"] for name, item in outputs.items()})
 
         st.session_state["resultado_comum"] = {
             "result": result,
+            "config": cfg,
+            "data_nome": data_nome,
             "gerado_em": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-            "outputs": outputs,
-            "zip_bytes": zip_bytes,
-            "zip_name": zip_name,
-            "protheus": protheus_payload,
+            "generation_id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
             "selecionados": {
                 "relatorio": gerar_relatorio,
                 "log": gerar_log,
@@ -369,7 +486,7 @@ def render_precificacao_comum():
     payload = st.session_state.get("resultado_comum")
     if payload:
         result = payload["result"]
-        st.success(f"Arquivos de Precificação Comum gerados com sucesso. Resultado mantido desde {payload['gerado_em']}.")
+        st.success(f"Processamento de Precificação Comum gerado com sucesso. Resultado mantido desde {payload['gerado_em']}.")
         r = result.resumo_dict
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("SKUs base", r.get("SKUs válidos na base", 0))
@@ -378,23 +495,30 @@ def render_precificacao_comum():
         m4.metric("Tabela 007/013", r.get("Linhas geradas tabela 007", 0))
         m5.metric("Intercorrências", len(result.log))
 
-        st.subheader("3. Baixar arquivos selecionados")
-        outputs = payload.get("outputs", {})
-        download_items = list(outputs.items()) + [(payload["zip_name"], {"label": "ZIP selecionados", "bytes": payload["zip_bytes"], "mime": "application/zip"})]
-        cols = st.columns(min(len(download_items), 6))
-        for idx, (fname, item) in enumerate(download_items):
-            with cols[idx % len(cols)]:
-                st.download_button(
-                    item["label"],
-                    item["bytes"],
-                    fname,
-                    mime=item["mime"],
-                    key=f"comum_down_{idx}_{fname}",
-                )
+        st.subheader("3. Revisar SKUs para exportação")
+        st.caption(
+            "Todos os SKUs vêm marcados por padrão. Desmarque os que não devem entrar nos CSVs Protheus desta execução. "
+            "A análise permanece disponível para auditoria."
+        )
+        default_skus = set()
+        for df_saida in result.saidas.values():
+            if df_saida is not None and not df_saida.empty and "SKU" in df_saida.columns:
+                default_skus.update(df_saida["SKU"].astype(str).apply(_normalizar_sku_exportacao).tolist())
+        selected_skus, selection_table = _render_editor_exportacao(result.analise, f"comum_editor_{payload['generation_id']}", default_skus)
+        filtered_result = _build_common_filtered_result(result, selected_skus)
+
+        c1, c2 = st.columns(2)
+        c1.metric("SKUs selecionados", len(selected_skus))
+        c2.metric("Tabelas Protheus selecionadas", len(payload.get("selecionados", {}).get("tabelas", [])))
+
+        outputs, zip_name, zip_bytes = _build_common_outputs(payload, filtered_result)
+
+        st.subheader("4. Baixar arquivos selecionados")
+        _render_downloads(outputs, zip_name, zip_bytes, "comum")
 
         tabs = st.tabs(["Análise", "Log", "001", "004", "012", "007", "013"])
         with tabs[0]:
-            st.dataframe(result.analise, use_container_width=True, hide_index=True)
+            st.dataframe(filtered_result.analise, use_container_width=True, hide_index=True)
         with tabs[1]:
             st.dataframe(result.log, use_container_width=True, hide_index=True)
             st.text_area("Prévia do log TXT", result.log_text, height=280, key="comum_log_preview")
@@ -402,7 +526,7 @@ def render_precificacao_comum():
         for idx, tabela in enumerate(["001", "004", "012", "007", "013"], start=2):
             with tabs[idx]:
                 if tabela in tabelas_selecionadas_payload:
-                    st.dataframe(result.saidas.get(tabela), use_container_width=True, hide_index=True)
+                    st.dataframe(filtered_result.saidas.get(tabela), use_container_width=True, hide_index=True)
                 else:
                     st.write(f"Tabela {tabela} não foi selecionada para exportação nesta execução.")
 

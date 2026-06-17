@@ -136,3 +136,37 @@ python run_cli.py ml --tabela-007 "tabela 007-0526.xlsx" --ml "PREÇOS ML - REVI
 ```bash
 python run_cli.py comum --base "precificacao_comum.xlsx" --saida saida_comum
 ```
+
+
+## Correção V11 - CSV Protheus
+
+O CSV de subida agora é gerado obrigatoriamente no layout:
+
+```csv
+007;;;
+36556;62.00;17/06/2026;
+```
+
+Regras reforçadas:
+- código da tabela com 3 dígitos no conteúdo e no nome do arquivo;
+- todas as linhas com `;` final;
+- 4 campos por linha para evitar erro Protheus `array out of bounds (4 of 3)`.
+
+## Feature V12 - seleção de SKUs antes da exportação
+
+Depois de gerar o processamento, o app exibe a etapa **Revisar SKUs para exportação**.
+
+Nessa etapa:
+
+- todos os SKUs vêm marcados por padrão;
+- o usuário pode desmarcar os SKUs que não devem ir para os arquivos Protheus;
+- os CSVs e o ZIP são montados somente com os SKUs marcados;
+- a análise continua visível para auditoria;
+- o relatório Excel passa a incluir a coluna `Exportar?`, indicando o que entrou ou não na exportação daquela execução.
+
+Essa função evita que o usuário edite o CSV manualmente no Excel, preservando o layout exigido pelo Protheus, especialmente:
+
+```csv
+007;;;
+36556;62.00;17/06/2026;
+```
