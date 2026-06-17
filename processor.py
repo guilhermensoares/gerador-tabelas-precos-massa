@@ -1000,20 +1000,34 @@ def _csv_value(value) -> str:
     return text
 
 
+def normalize_table_code(value) -> str:
+    """Normaliza código de tabela Protheus para 3 dígitos em CSV."""
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "000"
+    text = str(value).strip()
+    if re.fullmatch(r"\d+\.0", text):
+        text = text[:-2]
+    digits = re.sub(r"\D", "", text)
+    if digits:
+        return digits.zfill(3)[-3:]
+    return text.zfill(3)[:3]
+
+
 def build_protheus_csv_from_df(df_saida: pd.DataFrame, tabela: str) -> bytes:
-    """Gera CSV de subida Protheus.
+    """Gera CSV de subida Protheus no layout aceito pelo importador DA1.
 
-    Layout equivalente ao modelo Excel:
-    - A1 = código da tabela com 3 dígitos;
-    - A2 em diante = SKU com 5 dígitos;
-    - B2 em diante = preço com ponto decimal;
-    - C2 em diante = data da alteração.
+    Modelo validado no Protheus:
+    - 1ª linha: 007;;;  (4 campos, sendo 3 delimitadores)
+    - Demais linhas: SKU;PRECO;DATA;  (4 campos, último campo vazio)
 
-    Usa separador ';' para manter a abertura em colunas no Excel/Windows pt-BR,
-    sem alterar o ponto decimal dos preços.
+    Observação importante:
+    O importador customizado IMPDA1/DA1 acessa uma 4ª posição do array ao ler
+    o CSV. Por isso, mesmo havendo só 3 campos úteis, cada linha precisa terminar
+    com ';'. Sem esse delimitador final, o Protheus quebra com "array out of
+    bounds (4 of 3)".
     """
-    tabela = str(tabela).zfill(3)
-    linhas = [f"{tabela};;"]
+    tabela = normalize_table_code(tabela)
+    linhas = [f"{tabela};;;"]
 
     if df_saida is not None and not df_saida.empty:
         for _, row in df_saida.iterrows():
@@ -1024,6 +1038,7 @@ def build_protheus_csv_from_df(df_saida: pd.DataFrame, tabela: str) -> bytes:
                 _csv_value(sku_norm),
                 _csv_value(preco),
                 _csv_value(data),
+                "",
             ]))
 
     return ("\r\n".join(linhas) + "\r\n").encode("utf-8")

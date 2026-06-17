@@ -1,5 +1,8 @@
 # GERADOR DE TABELAS DE PREÇOS EM MASSA
 
+**Correção V10:** CSV Protheus ajustado para terminar todas as linhas com `;`, mantendo 4 campos por linha, conforme modelo manual aceito pelo importador DA1.
+
+
 Este app gera arquivos CSV no modelo de tabelas de preços em massa do Protheus e mantém relatórios analíticos em Excel.
 
 A versão atual possui uma **Home** com dois módulos:
@@ -101,10 +104,11 @@ Todos os arquivos Protheus são gerados em CSV, sem cabeçalho, com separador `;
 
 | Célula/Coluna | Regra |
 |---|---|
-| Linha 1, coluna A | Código da tabela com 3 dígitos, exemplo `007` |
+| Linha 1 | Código da tabela com 3 dígitos e 4 campos no total, exemplo `007;;;` |
 | Coluna A, a partir da linha 2 | SKUs normalizados com 5 dígitos, exemplo `00050` |
 | Coluna B, a partir de B2 | Preço com ponto decimal, exemplo `25.99` |
 | Coluna C, a partir de C2 | Data da alteração em `DD/MM/AAAA` |
+| Delimitador final | Todas as linhas terminam com `;`, exemplo `00050;25.99;17/06/2026;` |
 | Observação | O relatório analítico permanece em `.xlsx`; apenas os arquivos de subida Protheus são `.csv` |
 
 ## Logs
